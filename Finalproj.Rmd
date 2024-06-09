@@ -1,0 +1,249 @@
+---
+title: "Final Project"
+author: ""
+date: "2024-06-03"
+output: pdf_document
+---
+#Data Collection
+This data set is downloaded from Kaggle.
+https://www.kaggle.com/datasets/aadarshvelu/aids-virus-infection-prediction
+
+```{r}
+library(tidyverse)
+library(survival)
+library(cluster)
+library(ggplot2)
+library(dplyr)
+library(broom)
+library(caret)
+library(stats)
+library(reshape2)
+
+set.seed(333)
+
+data <- read.csv("AIDS_Classification.csv")
+```
+
+Before we begin, we check if there happen to be missing values for this dataset
+```{r}
+cat("Number of missing values per column:\n")
+sapply(data, function(x) sum(is.na(x)))
+```
+#Exploratory Data Analysis
+There doesn't seem to be any missing data, now we can look at the frequencies of the classes to look at the distribution of the data
+```{r}
+#raw number of infect and noninfected
+ggplot(data, aes(x=factor(infected), fill=factor(infected))) +
+  geom_bar() +
+  scale_fill_manual(values=c("green", "blue"), labels=c("Non-Infected", "Infected")) +
+  labs(x="Infection Status", y="Number of People", fill="Status") +
+  ggtitle("Histogram of Infected vs Non-Infected Individuals")
+
+```
+The data is not horribly imbalanced but still shows slight signs of imbalance. Checking the specific distributive percentages of the classes
+
+```{r}
+data_percentage <- data %>%
+  group_by(infected) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+
+print(data_percentage)
+```
+
+##Visualizing key variables
+```{r}
+# visualize distributions of key variables
+ggplot(data, aes(x=age)) + geom_histogram(bins=30, fill="blue") + ggtitle("Age Distribution")
+ggplot(data, aes(x=wtkg)) + geom_histogram(bins=30, fill="green") + ggtitle("Weight Distribution")
+
+# check for outliers
+ggplot(data, aes(y=age)) + geom_boxplot(fill="coral") + ggtitle("Age Boxplot")
+ggplot(data, aes(y=wtkg)) + geom_boxplot(fill="lightblue") + ggtitle("Weight Boxplot")
+
+```
+
+\vskip 0.5in
+##Correlation Matrix
+```{r}
+data$infected <- as.numeric(data$infected)
+numerical_data <- select_if(data, is.numeric)
+
+correlation_matrix <- cor(numerical_data)
+
+melted_correlation_matrix <- melt(correlation_matrix)
+
+ggplot(melted_correlation_matrix, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(limit = c(-0.5, 1), mid = "white", high = "red", low = "blue", midpoint = 0) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  labs(title = "Correlation Matrix", x = "", y = "")
+```
+The vast number of variables make the correlation matrix hard to analyze.
+\vskip 0.5in
+
+##Feature Selection
+Using statistical techniques to identify the most important features
+```{r}
+# using recursive feature elimination
+control <- rfeControl(functions=rfFuncs, method="cv", number=10)
+results <- rfe(data[, -ncol(data)], data[, ncol(data)], sizes=c(1:5), rfeControl=control)
+print(results)
+
+# Plotting feature importance
+plot(results)
+
+```
+
+##model biulding
+```{r}
+# Logistic regression with glm
+model <- glm(infected ~ age + time + cd40 + offtrt + preanti, data = data, family = binomial())
+summary(model)
+
+# extracting model coefficients
+tidy_model <- tidy(model)
+tidy_model$importance <- abs(tidy_model$estimate / tidy_model$std.error)
+
+# plotting variable importance
+ggplot(tidy_model, aes(x = reorder(term, importance), y = importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Variable Importance Plot", x = "Predictors", y = "Importance (|Coefficient/SE|)")
+
+```
+\vskip 0.5in
+
+##clustering 
+Lets begin by determining the #of clusters we want to use for k
+```{r}
+numeric_columns <- sapply(data, is.numeric)
+data[numeric_columns] <- scale(data[numeric_columns])
+
+#Elbow method
+wss <- sapply(1:10, function(k) sum(kmeans(data[numeric_columns], centers=k, nstart=10)$withinss))
+plot(1:10, wss, type="b", xlab="Number of Clusters", ylab="Within groups sum of squares")
+```
+4 seems to be a reasonable choice
+
+```{r}
+# K-means clustering
+kmeans_result <- kmeans(data[numeric_columns], centers=4, nstart=25)
+data$cluster <- kmeans_result$cluster
+
+# visualizing in pca
+pca_results <- prcomp(data[numeric_columns])
+pca_data <- data.frame(PC1 = pca_results$x[,1], PC2 = pca_results$x[,2], cluster = as.factor(kmeans_result$cluster))
+
+# Assuming 'pca_data' contains the PCA results and cluster assignments
+ggplot(pca_data, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha=0.7) +
+  stat_ellipse(type = "t", linetype = 2, size = 1, level = 0.95) +  # Adds ellipses
+  labs(title = "PCA of Dataset with K-Means Clusters", x = "Principal Component 1", y = "Principal Component 2") +
+  scale_color_brewer(type = "qual", palette = "Set1") +
+  theme_minimal()
+
+```
+The axes (PC1 and PC2) represent the principal components that account for the most variance in the data
+
+##Hierarchical clustering
+
+```{r}
+hc_result <- hclust(dist(data[numeric_columns]), method="ward.D2")
+plot(hc_result, main = "Customized Dendrogram", xlab = "Index of Data Points", ylab = "Height",
+     lty = 2, col = "blue", sub = "", cex = 0.6)
+rect.hclust(hc_result, k = 4, border = "red")
+```
+
+\vskip 0.5in
+
+##Do AIDS patients exhibit different patterns of treatment response based on the type of treatment received? How do CD4/CD8 counts change over time for patients under different treatment regimens?
+
+Box plots 
+```{r}
+data <- read.csv("AIDS_Classification.csv")
+data$trt <- as.factor(data$trt)
+
+#CD4 counts at baseline
+ggplot(data, aes(x = factor(trt), y = cd40, fill = factor(trt))) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "CD4 Counts at Baseline by Treatment", x = "Treatment Group", y = "CD4 Count") +
+  theme_minimal()
+
+#D4 counts at 20 week
+ggplot(data, aes(x = factor(trt), y = cd420, fill = factor(trt))) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "CD4 Counts at 20 Weeks by Treatment", x = "Treatment Group", y = "CD4 Count") +
+  theme_minimal()
+
+# CD8 counts at baseline
+ggplot(data, aes(x = factor(trt), y = cd80, fill = factor(trt))) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "CD8 Counts at Baseline by Treatment", x = "Treatment Group", y = "CD8 Count") +
+  theme_minimal()
+
+#CD8 counts at 20 week
+ggplot(data, aes(x = factor(trt), y = cd820, fill = factor(trt))) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "CD8 Counts at 20 Weeks by Treatment", x = "Treatment Group", y = "CD8 Count") +
+  theme_minimal()
+
+
+```
+
+Change plots
+```{r}
+data <- data %>%
+  mutate(cd4_change = cd420 - cd40,
+         cd8_change = cd820 - cd80)
+
+# Change in CD4 and CD8 counts
+ggplot(data, aes(x = factor(trt), y = cd4_change,fill = factor(trt))) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "Change in CD4 Counts by Treatment from Baseline to 20 Weeks", x = "Treatment Group", y = "Change in CD4 Count") +
+  theme_minimal()
+
+ggplot(data, aes(x = factor(trt), y = cd8_change,fill = factor(trt))) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "Change in CD8 Counts by Treatment from Baseline to 20 Weeks", x = "Treatment Group", y = "Change in CD8 Count") +
+  theme_minimal()
+
+```
+
+Histogram
+```{r}
+#histogram for cd4-cd4 20 weeks
+par(mfrow=c(1,2))
+hist(data$cd40, main="Histogram of CD40", xlab="CD4 at baseline")
+hist(data$cd420, main="Histogram of CD420", xlab="CD4 at follow-up")
+par(mfrow=c(1,1))
+
+#histogram for cd8-cd8 20 weeks
+par(mfrow=c(1,2))
+hist(data$cd80, main="Histogram of CD80", xlab="CD8 at baseline")
+hist(data$cd820, main="Histogram of CD820", xlab="CD8 at follow-up")
+par(mfrow=c(1,1))
+```
+
+ANOVA tables
+```{r}
+# ANOVA for CD4 counts from baseline to follow-up
+anova_cd4 <- aov(cd40 ~ cd420 + trt, data = data)
+summary(anova_cd4)
+
+# ANOVA for CD8 counts from baseline to follow-up
+anova_cd8 <- aov(cd80 ~ cd820 + trt, data = data)
+summary(anova_cd8)
+
+# ANOVA to test for differences in changes in CD4 counts across treatment groups
+anova_result <- aov(cd4_change ~ factor(trt), data = data)
+summary(anova_result)
+
+```
